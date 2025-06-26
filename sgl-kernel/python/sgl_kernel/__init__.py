@@ -72,6 +72,10 @@ from sgl_kernel.speculative import (
     tree_speculative_sampling_target_only,
     verify_tree_greedy,
 )
+from sgl_kernel.spatial import(
+    create_greenctx_stream_by_value,
+    get_sm_available,
+)
 from sgl_kernel.top_k import fast_topk
 from sgl_kernel.version import __version__
 
