@@ -1,4 +1,3 @@
-
 #include <vector>
 
 std::vector<int64_t> create_greenctx_stream_by_percent(float smA, float smB, int device);

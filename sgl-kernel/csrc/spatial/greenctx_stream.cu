@@ -1,11 +1,11 @@
+#include <torch/all.h>
+
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 
-#include <torch/all.h>
-
-#include "greenctx_stream.h"
 #include "cuda_utils.h"
+#include "greenctx_stream.h"
 
 std::vector<int64_t> create_greenctx_stream_by_percent(float smA, float smB, int device) {
   CUgreenCtx gctx[3];
@@ -35,13 +35,11 @@ std::vector<int64_t> create_greenctx_stream_by_percent(float smA, float smB, int
   unsigned int minCountA = (unsigned int)((float)input.sm.smCount * smA);
 
   // Split resources
-  CUDA_DRV(
-      cuDevSmResourceSplitByCount(&resources[2], &nbGroups, &input, &resources[3], 0, minCount));
+  CUDA_DRV(cuDevSmResourceSplitByCount(&resources[2], &nbGroups, &input, &resources[3], 0, minCount));
   CUDA_DRV(cuDevResourceGenerateDesc(&desc[2], &resources[2], 1));
   CUDA_DRV(cuGreenCtxCreate(&gctx[2], desc[2], (CUdevice)device, CU_GREEN_CTX_DEFAULT_STREAM));
   CUDA_DRV(cuGreenCtxGetDevResource(gctx[2], &input, CU_DEV_RESOURCE_TYPE_SM));
-  CUDA_DRV(
-      cuDevSmResourceSplitByCount(&resources[0], &nbGroups, &input, &resources[1], 0, minCountA));
+  CUDA_DRV(cuDevSmResourceSplitByCount(&resources[0], &nbGroups, &input, &resources[1], 0, minCountA));
 
   CUDA_DRV(cuDevResourceGenerateDesc(&desc[0], &resources[0], 1));
   CUDA_DRV(cuGreenCtxCreate(&gctx[0], desc[0], (CUdevice)device, CU_GREEN_CTX_DEFAULT_STREAM));
@@ -81,18 +79,15 @@ std::vector<int64_t> create_greenctx_stream_by_value(int64_t smA, int64_t smB, i
   unsigned int minCount = (unsigned int)(smA + smB);
   unsigned int minCountA = (unsigned int)(smA);
 
-  TORCH_CHECK(minCount <= input.sm.smCount,
-              "Not enough SMs available for the requested configuration");
+  TORCH_CHECK(minCount <= input.sm.smCount, "Not enough SMs available for the requested configuration");
 
   // Split resources
-  CUDA_DRV(
-      cuDevSmResourceSplitByCount(&resources[2], &nbGroups, &input, &resources[3], 0, minCount));
+  CUDA_DRV(cuDevSmResourceSplitByCount(&resources[2], &nbGroups, &input, &resources[3], 0, minCount));
 
   CUDA_DRV(cuDevResourceGenerateDesc(&desc[2], &resources[2], 1));
   CUDA_DRV(cuGreenCtxCreate(&gctx[2], desc[2], (CUdevice)device, CU_GREEN_CTX_DEFAULT_STREAM));
   CUDA_DRV(cuGreenCtxGetDevResource(gctx[2], &input, CU_DEV_RESOURCE_TYPE_SM));
-  CUDA_DRV(
-      cuDevSmResourceSplitByCount(&resources[0], &nbGroups, &input, &resources[1], 0, minCountA));
+  CUDA_DRV(cuDevSmResourceSplitByCount(&resources[0], &nbGroups, &input, &resources[1], 0, minCountA));
 
   CUDA_DRV(cuDevResourceGenerateDesc(&desc[0], &resources[0], 1));
   CUDA_DRV(cuGreenCtxCreate(&gctx[0], desc[0], (CUdevice)device, CU_GREEN_CTX_DEFAULT_STREAM));
