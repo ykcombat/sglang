@@ -235,6 +235,10 @@ class ServerArgs:
     disaggregation_ib_device: Optional[str] = None
     num_reserved_decode_tokens: int = 512  # used for decode kv cache offload in PD
     pdlb_url: Optional[str] = None
+    
+    # For PD-Multiplexing
+    enable_pdmux: bool = False
+    sm_group_num: int = 3
 
     # For model weight update
     custom_weight_loader: Optional[List[str]] = None
@@ -1613,6 +1617,17 @@ class ServerArgs:
             "--weight-loader-disable-mmap",
             action="store_true",
             help="Disable mmap while loading weight using safetensors.",
+        )
+        parser.add_argument(
+            "--enable-pdmux",
+            action="store_true",
+            help="Enable PD-Multiplexing, PD running on greenctx stream.",
+        )
+        parser.add_argument(
+            "--sm-group-num",
+            type=int,
+            default=ServerArgs.sm_group_num,
+            help="Number of sm partition groups.",
         )
 
     @classmethod

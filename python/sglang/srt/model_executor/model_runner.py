@@ -187,6 +187,7 @@ class ModelRunner:
         self.token_to_kv_pool_allocator = token_to_kv_pool_allocator
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
+        self.sm_group_num = server_args.sm_group_num
 
         self.forward_pass_id = 0
 
@@ -1039,7 +1040,14 @@ class ModelRunner:
 
     def init_attention_backend(self):
         """Init attention kernel backend."""
-        if self.server_args.enable_two_batch_overlap:
+        if self.server_args.enable_pdmux:
+            self.attn_backend = self._get_attention_backend()
+            self.decode_attn_backend_group = []
+            self.decode_attn_backend = self._get_attention_backend()
+            self.decode_attn_backend_group.append(self.decode_attn_backend)
+            for _ in range(self.server_args.sm_group_num - 1):
+                self.decode_attn_backend_group.append(self._get_attention_backend())                    
+        elif self.server_args.enable_two_batch_overlap:
             self.attn_backend = TboAttnBackend.init_new(self._get_attention_backend)
         else:
             self.attn_backend = self._get_attention_backend()
@@ -1167,6 +1175,9 @@ class ModelRunner:
 
         device_mesh = torch.distributed.init_device_mesh(self.device, (self.tp_size,))
         tensor_parallel(self.model, device_mesh)
+        
+    def update_decode_attn_backend(self, stream_idx: int):
+        self.decode_attn_backend = self.decode_attn_backend_group[stream_idx]
 
     def forward_decode(
         self, forward_batch: ForwardBatch, pp_proxy_tensors=None
