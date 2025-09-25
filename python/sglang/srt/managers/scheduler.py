@@ -884,25 +884,55 @@ class Scheduler(
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
-        while True:
-            recv_reqs = self.recv_requests()
-            self.process_input_requests(recv_reqs)
+        from torch.profiler import ProfilerActivity, profile
+        
+        prof_count = 0
+        start_prof = False
 
-            batch = self.get_next_batch_to_run()
-            self.cur_batch = batch
+        stream_group = self.stream_groups[2]
+        prefill_stream = stream_group[0]
+        decode_stream = stream_group[1]
 
-            if batch:
-                for req in batch.reqs:
-                    trace_event("schedule", req.rid)
+        with profile(
+            activities=[ProfilerActivity.CUDA, ProfilerActivity.CPU],
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) as prof:
+            prof.stop()
+            while True:
+                recv_reqs = self.recv_requests()
+                self.process_input_requests(recv_reqs)
 
-            if batch:
-                result = self.run_batch(batch)
-                self.process_batch_result(batch, result)
-            else:
-                # When the server is idle, do self-check and re-init some states
-                self.self_check_during_idle()
+                batch = self.get_next_batch_to_run()
+                self.cur_batch = batch
 
-            self.last_batch = batch
+                if batch:
+                    for req in batch.reqs:
+                        trace_event("schedule", req.rid)
+
+                if batch:
+                    result = self.run_batch(batch)
+                    self.process_batch_result(batch, result)
+                    prof_count += 1
+                    if not start_prof:
+                        if prof_count == 50:
+                            start_prof = True
+                            logger.debug("Starting profiler...")
+                            prof.start()
+                    else:
+                        if prof_count == 70:
+                            logger.debug("Stopping profiler...")
+                            prof.stop()
+                            prof.export_chrome_trace(
+                                f"normal_profiler_{time.time()}_TP{self.tp_rank}.json"
+                            )
+                            
+                else:
+                    # When the server is idle, do self-check and re-init some states
+                    self.self_check_during_idle()
+
+                self.last_batch = batch
 
     @DynamicGradMode()
     def event_loop_overlap(self):
@@ -2852,7 +2882,7 @@ def run_scheduler_process(
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
         if disaggregation_mode == DisaggregationMode.NULL:
             if scheduler.enable_pdmux:
-                scheduler.event_loop_pdmux()
+                scheduler.event_loop_normal()
             elif server_args.pp_size > 1:
                 scheduler.event_loop_pp()
             elif scheduler.enable_overlap:
