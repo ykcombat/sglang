@@ -150,6 +150,7 @@ from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
 from sglang.srt.multiplex.multiplexing import SchedulerMultiplexMixin
+from sglang.srt.multiplex.dpattn import SchedulerMultiplexDPAttnMixin
 from sglang.srt.multiplex.pdmux_context import (
     get_sm_counts,
     get_stream_groups,
@@ -228,6 +229,7 @@ class Scheduler(
     SchedulerDisaggregationDecodeMixin,
     SchedulerDisaggregationPrefillMixin,
     SchedulerMultiplexMixin,
+    SchedulerMultiplexDPAttnMixin,
 ):
     """A scheduler that manages a tensor parallel GPU worker."""
 
@@ -1779,6 +1781,7 @@ class Scheduler(
 
         # Handle DP attention
         if need_dp_attn_preparation:
+            logger.info("Preparing DP attention")
             self.maybe_handle_dp_balance_data()
             ret = self.prepare_mlp_sync_batch(ret)
 
@@ -2129,12 +2132,12 @@ class Scheduler(
             self.return_health_check_ct -= 1
             self.send_to_tokenizer.send_pyobj(HealthCheckOutput())
 
-    def prepare_mlp_sync_batch(self, local_batch: ScheduleBatch):
+    def prepare_mlp_sync_batch(self, local_batch: ScheduleBatch, tp_group = None):
         return self.prepare_mlp_sync_batch_raw(
             local_batch,
             dp_size=self.server_args.dp_size,
             attn_tp_size=self.attn_tp_size,
-            tp_group=self.tp_group,
+            tp_group=tp_group or self.tp_group,
             get_idle_batch=self.get_idle_batch,
             disable_cuda_graph=self.server_args.disable_cuda_graph,
             spec_algorithm=self.spec_algorithm,
@@ -2865,7 +2868,12 @@ def run_scheduler_process(
         disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
         if disaggregation_mode == DisaggregationMode.NULL:
             if scheduler.enable_pdmux:
-                scheduler.event_loop_pdmux()
+                if server_args.enable_dp_attention:
+                    # DP attention + PDmux
+                    scheduler.event_loop_pdmux_dp_attn()
+                else:
+                    scheduler.event_loop_pdmux()
+
             elif server_args.pp_size > 1:
                 scheduler.event_loop_pp()
             elif scheduler.enable_overlap:
