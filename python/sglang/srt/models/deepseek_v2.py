@@ -2557,6 +2557,75 @@ class DeepseekV2ForCausalLM(nn.Module):
         else:
             return hidden_states
 
+    @torch.no_grad()
+    def forward_split_prefill(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        forward_batch: ForwardBatch,
+        split_interval: Tuple[int, int],  # [start, end) 0-based
+        input_embeds: torch.Tensor = None,
+    ):
+        logger.info("start split prefill forward.")
+        total_num_layers = self.end_layer - self.start_layer
+        device = input_embeds.device if input_embeds is not None else input_ids.device
+        zero_allocator = BumpAllocator(
+            buffer_size=total_num_layers * 2 * (2 if forward_batch.can_run_tbo else 1),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        has_gemm_output_zero_allocator = hasattr(
+            self, "gemm_output_zero_allocator_size"
+        )
+
+        gemm_output_zero_allocator = (
+            BumpAllocator(
+                buffer_size=self.gemm_output_zero_allocator_size,
+                dtype=torch.float32,
+                device=device,
+            )
+            if has_gemm_output_zero_allocator
+            and self.gemm_output_zero_allocator_size > 0
+            else None
+        )
+
+
+        start, end = split_interval
+        # embed
+        if start == 0:
+            if input_embeds is None:
+                forward_batch.hidden_states = self.model.embed_tokens(input_ids)
+            else:
+                forward_batch.hidden_states = input_embeds
+        # decoder layer
+        for i in range(start, end):
+            with get_global_expert_distribution_recorder().with_current_layer(i):
+                layer = self.model.layers[i]
+                forward_batch.hidden_states, forward_batch.residual = layer(
+                    positions,
+                    forward_batch.hidden_states,
+                    forward_batch,
+                    forward_batch.residual,
+                    zero_allocator,
+                    gemm_output_zero_allocator,
+                )
+
+        if end == self.config.num_hidden_layers:
+            # norm
+            if not forward_batch.forward_mode.is_idle():
+                forward_batch.hidden_states, _ = self.model.norm(
+                    forward_batch.hidden_states, forward_batch.residual
+                )
+            # logits process
+            result = self.logits_processor(
+                input_ids, forward_batch.hidden_states, self.lm_head, forward_batch
+            )
+        else:
+            result = None
+        logger.info("Finished split prefill forward.")
+        return result
+
     @property
     def start_layer(self):
         return self.model.start_layer
