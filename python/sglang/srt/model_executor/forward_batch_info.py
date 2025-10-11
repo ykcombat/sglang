@@ -88,6 +88,7 @@ class ForwardMode(IntEnum):
 
     # Split Prefill for PD multiplexing
     SPLIT_PREFILL = auto()
+    SPLIT_PREFILL_IDLE = auto()
 
     def is_prefill(self):
         return self.is_extend()
@@ -107,10 +108,10 @@ class ForwardMode(IntEnum):
         return self == ForwardMode.MIXED
 
     def is_idle(self):
-        return self == ForwardMode.IDLE
+        return self == ForwardMode.IDLE or self == ForwardMode.SPLIT_PREFILL_IDLE
 
     def is_decode_or_idle(self):
-        return self == ForwardMode.DECODE or self == ForwardMode.IDLE
+        return self == ForwardMode.DECODE or self == ForwardMode.IDLE or self == ForwardMode.SPLIT_PREFILL_IDLE
 
     def is_target_verify(self):
         return self == ForwardMode.TARGET_VERIFY
@@ -140,7 +141,7 @@ class ForwardMode(IntEnum):
         return self == ForwardMode.DUMMY_FIRST
 
     def is_split_prefill(self):
-        return self == ForwardMode.SPLIT_PREFILL
+        return self == ForwardMode.SPLIT_PREFILL or self == ForwardMode.SPLIT_PREFILL_IDLE
 
 
 @total_ordering

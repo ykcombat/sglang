@@ -1936,7 +1936,7 @@ class ModelRunner:
         reinit_attn_backend: bool = False,
         forward_count: int = 1,
     ) -> LogitsProcessorOutput:
-        if forward_batch.split_index == 0 or reinit_attn_backend:
+        if (forward_batch.split_index == 0 or reinit_attn_backend) and not forward_batch.forward_mode.is_idle():
             self.attn_backend.init_forward_metadata(forward_batch)
         next_split_index = min(
             forward_batch.split_index + forward_count,
