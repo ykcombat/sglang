@@ -2035,6 +2035,7 @@ class ModelRunner:
         if (
             forward_batch.global_num_tokens_cpu is not None
             and self.pp_group.is_last_rank
+            and (not forward_batch.forward_mode.is_split_prefill() or forward_batch.split_index == self.model_config.num_hidden_layers)
         ):
             forward_batch.post_forward_mlp_sync_batch(ret)
 
