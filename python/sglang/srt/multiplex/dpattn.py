@@ -23,10 +23,12 @@ logger = logging.getLogger(__name__)
 
 class SchedulerMultiplexDPAttnMixin:
 
-    def adjust_stream_groups(self) -> tuple[int, tuple[ExternalStream, ExternalStream]]:
+    def adjust_stream_groups_dp(self) -> tuple[int, tuple[ExternalStream, ExternalStream]]:
         decode_bs = sum(self.running_batch.global_num_tokens) if self.running_batch.global_num_tokens else 0
 
         prefill_tokens = sum(self.split_prefill_batch.global_num_tokens) if self.split_prefill_batch and self.split_prefill_batch.global_num_tokens else 0
+
+        logger.debug(f"Adjusting stream groups with decode_bs: {self.running_batch.batch_size()} / {decode_bs}, prefill_tokens: {prefill_tokens}")
 
         if decode_bs > 0 and prefill_tokens > 0:
             manual_divisions = self.pdmux_config.manual_divisions
@@ -118,10 +120,10 @@ class SchedulerMultiplexDPAttnMixin:
                 if batch:
                     if not batch.is_empty():
                         pass
-                        # logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}")
+                        logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
                     else:
                         pass
-                        # logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
+                        logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
                 
                 self.running_batch = batch or self.running_batch
 
@@ -138,7 +140,7 @@ class SchedulerMultiplexDPAttnMixin:
             if adjust_stream_group:
                 prefill_stream.synchronize()
                 decode_stream.synchronize()
-                stream_idx, stream_group = self.adjust_stream_groups()
+                stream_idx, stream_group = self.adjust_stream_groups_dp()
                 prefill_stream = stream_group[0]
                 decode_stream = stream_group[1]
                 adjust_stream_group = False
@@ -173,7 +175,7 @@ class SchedulerMultiplexDPAttnMixin:
                             self.pdmux_config.split_forward_token_budget
                             // sum(self.split_prefill_batch.global_num_tokens),
                         )
-                        if self.split_prefill_batch.extend_num_tokens > 0
+                        if sum(self.split_prefill_batch.global_num_tokens) > 0
                         else self.model_config.num_hidden_layers
                     )
                     next_split_index = min(
@@ -204,6 +206,8 @@ class SchedulerMultiplexDPAttnMixin:
                 decode_stream.synchronize()
                 if decode_done:
                     self.process_batch_result(self.running_batch, decode_result)
+                    if self.running_batch.forward_mode.is_idle():
+                        self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
                     self.running_batch.forward_mode = ForwardMode.DECODE # reset to decode mode
 
             with torch.cuda.stream(prefill_stream):
