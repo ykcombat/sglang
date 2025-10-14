@@ -2566,7 +2566,6 @@ class DeepseekV2ForCausalLM(nn.Module):
         split_interval: Tuple[int, int],  # [start, end) 0-based
         input_embeds: torch.Tensor = None,
     ):
-        logger.info("start split prefill forward.")
         total_num_layers = self.end_layer - self.start_layer
         device = input_embeds.device if input_embeds is not None else input_ids.device
         zero_allocator = BumpAllocator(
@@ -2623,7 +2622,6 @@ class DeepseekV2ForCausalLM(nn.Module):
             )
         else:
             result = None
-        logger.info("Finished split prefill forward.")
         return result
 
     @property

@@ -114,18 +114,19 @@ class SchedulerMultiplexDPAttnMixin:
             with torch.cuda.stream(decode_stream):
                 set_pdmux_status(False)
                 self.running_batch = self.update_running_batch(self.running_batch)
+                # logger.debug(f"Updated running batch {self.running_batch.reqs =}")
                 # Handle DP attn preparetion
                 batch = self.running_batch if not self.running_batch.is_empty() else None
                 batch = self.prepare_mlp_sync_batch(batch)
                 if batch:
                     if not batch.is_empty():
                         pass
-                        logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
+                        # logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
                     else:
                         pass
-                        logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
+                        # logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
                 
-                self.running_batch = batch or self.running_batch
+                self.running_batch = batch or ScheduleBatch(reqs=[])
 
 
                 adjust_stream_group = adjust_stream_group or (
@@ -206,9 +207,7 @@ class SchedulerMultiplexDPAttnMixin:
                 decode_stream.synchronize()
                 if decode_done:
                     self.process_batch_result(self.running_batch, decode_result)
-                    if self.running_batch.forward_mode.is_idle():
-                        self.running_batch = ScheduleBatch(reqs=[], batch_is_full=False)
-                    self.running_batch.forward_mode = ForwardMode.DECODE # reset to decode mode
+                    # logger.debug(f"Finished decode batch {self.running_batch.reqs =}")
 
             with torch.cuda.stream(prefill_stream):
                 set_pdmux_status(True)
