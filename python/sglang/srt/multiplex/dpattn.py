@@ -97,141 +97,329 @@ class SchedulerMultiplexDPAttnMixin:
             f"PDMux stream groups: {stream_idx}, prefill sm: {self.sm_counts[stream_idx][0]}, decode sm: {self.sm_counts[stream_idx][1]}"
         )
 
-        while True:
-            with torch.cuda.stream(decode_stream):
-                set_pdmux_status(False)
-                recv_reqs = self.recv_requests()
-                self.process_input_requests(recv_reqs)
+        from torch.profiler import profile, record_function, ProfilerActivity
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            with_stack=True,
+        ) as prof:
+            prof.stop()
+            start_prof = False
+            prof_cnt = 0
 
-            with torch.cuda.stream(prefill_stream):
-                set_pdmux_status(True)
-                sm_count = self.sm_counts[stream_idx][0]
-                if not wait_prefill_kernel_done:
-                    adjust_stream_group = (
-                        self.update_split_prefill_batch_dp(sm_count) or adjust_stream_group
+            while True:
+                with torch.cuda.stream(decode_stream):
+                    set_pdmux_status(False)
+                    recv_reqs = self.recv_requests()
+                    self.process_input_requests(recv_reqs)
+
+                with torch.cuda.stream(prefill_stream):
+                    set_pdmux_status(True)
+                    sm_count = self.sm_counts[stream_idx][0]
+                    if not wait_prefill_kernel_done:
+                        adjust_stream_group = (
+                            self.update_split_prefill_batch_dp(sm_count) or adjust_stream_group
+                        )
+
+                with torch.cuda.stream(decode_stream):
+                    set_pdmux_status(False)
+                    self.running_batch = self.update_running_batch(self.running_batch)
+                    # logger.debug(f"Updated running batch {self.running_batch.reqs =}")
+                    # Handle DP attn preparetion
+                    batch = self.running_batch if not self.running_batch.is_empty() else None
+                    batch = self.prepare_mlp_sync_batch(batch)
+                    if batch:
+                        if not batch.is_empty():
+                            pass
+                            # logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
+                        else:
+                            pass
+                            # logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
+                    
+                    self.running_batch = batch or ScheduleBatch(reqs=[])
+                    is_decode_empty = sum(self.running_batch.global_num_tokens) == 0 if self.running_batch.global_num_tokens else True
+
+                    adjust_stream_group = adjust_stream_group or (
+                        stream_idx > 0 and is_decode_empty
                     )
-
-            with torch.cuda.stream(decode_stream):
-                set_pdmux_status(False)
-                self.running_batch = self.update_running_batch(self.running_batch)
-                # logger.debug(f"Updated running batch {self.running_batch.reqs =}")
-                # Handle DP attn preparetion
-                batch = self.running_batch if not self.running_batch.is_empty() else None
-                batch = self.prepare_mlp_sync_batch(batch)
-                if batch:
-                    if not batch.is_empty():
-                        pass
-                        # logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
+                    if not batch and self.split_prefill_batch is None:
+                        self.check_memory()
+                        self.check_tree_cache()
+                        self.new_token_ratio = self.init_new_token_ratio
+                        self.maybe_sleep_on_idle()
                     else:
-                        pass
-                        # logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
+                        if not start_prof:
+                            prof_cnt += 1
+                            if prof_cnt == 50:
+                                start_prof = True
+                                logger.info("Start profiler ...")
+                                prof.start()
+                                logger.info("Profiler started ...")
+                        else:
+                            prof_cnt += 1
+                            if prof_cnt == 100:
+                                logger.info("Stop profiler ...")
+                                prof.stop()
+                                file_name = f"./traces/pdmux_dp_attn_prof_{self.tp_rank}_{int(time.time())}.json"
+                                prof.export_chrome_trace(file_name)
+                                logger.info(f"Profiler stopped and exported to {file_name}")
+
+                if adjust_stream_group:
+                    prefill_stream.synchronize()
+                    decode_stream.synchronize()
+                    stream_idx, stream_group = self.adjust_stream_groups_dp()
+                    prefill_stream = stream_group[0]
+                    decode_stream = stream_group[1]
+                    adjust_stream_group = False
+                    logger.info(
+                        f"Adjusting stream groups: {stream_idx}, prefill sm: {self.sm_counts[stream_idx][0]}, decode sm: {self.sm_counts[stream_idx][1]}"
+                    )
+
+                with torch.cuda.stream(decode_stream):
+                    set_pdmux_status(False)
+                    # process decode batch
+                    if not self.running_batch.is_empty():
+                        # logger.debug("run decode batch")
+                        decode_result = self.run_batch(self.running_batch)
+                        decode_done = True
+                    elif self.running_batch.forward_mode and self.running_batch.forward_mode.is_idle():
+                        # logger.debug("run decode IDLE batch")
+                        decode_result = self.run_batch(self.running_batch)
+                        decode_done = True
+                    else:
+                        decode_done = False
                 
-                self.running_batch = batch or ScheduleBatch(reqs=[])
-
-
-                adjust_stream_group = adjust_stream_group or (
-                    stream_idx > 0 and self.running_batch.is_empty()
-                )
-                if not batch and self.split_prefill_batch is None:
-                    self.check_memory()
-                    self.check_tree_cache()
-                    self.new_token_ratio = self.init_new_token_ratio
-                    self.maybe_sleep_on_idle()
-
-            if adjust_stream_group:
-                prefill_stream.synchronize()
-                decode_stream.synchronize()
-                stream_idx, stream_group = self.adjust_stream_groups_dp()
-                prefill_stream = stream_group[0]
-                decode_stream = stream_group[1]
-                adjust_stream_group = False
-                logger.debug(
-                    f"Adjusting stream groups: {stream_idx}, prefill sm: {self.sm_counts[stream_idx][0]}, decode sm: {self.sm_counts[stream_idx][1]}"
-                )
-
-            with torch.cuda.stream(decode_stream):
-                set_pdmux_status(False)
-                # process decode batch
-                if not self.running_batch.is_empty():
-                    # logger.debug("run decode batch")
-                    decode_result = self.run_batch(self.running_batch)
-                    decode_done = True
-                elif self.running_batch.forward_mode and self.running_batch.forward_mode.is_idle():
-                    # logger.debug("run decode IDLE batch")
-                    decode_result = self.run_batch(self.running_batch)
-                    decode_done = True
-                else:
-                    decode_done = False
-            with torch.cuda.stream(prefill_stream):
-                set_pdmux_status(True)
-                if (
-                    self.split_prefill_batch
-                    and (not self.split_prefill_batch.is_empty() or self.split_prefill_batch.forward_mode == ForwardMode.SPLIT_PREFILL_IDLE)
-                    and not wait_prefill_kernel_done
-                ):
-                    prefill_done = True
-                    forward_count = (
-                        max(
-                            1,
-                            self.pdmux_config.split_forward_token_budget
-                            // sum(self.split_prefill_batch.global_num_tokens),
+                with torch.cuda.stream(prefill_stream):
+                    set_pdmux_status(True)
+                    if (
+                        self.split_prefill_batch
+                        and (not self.split_prefill_batch.is_empty() or self.split_prefill_batch.forward_mode == ForwardMode.SPLIT_PREFILL_IDLE)
+                        and not wait_prefill_kernel_done
+                    ):
+                        prefill_done = True
+                        forward_count = (
+                            max(
+                                1,
+                                self.pdmux_config.split_forward_token_budget
+                                // sum(self.split_prefill_batch.global_num_tokens),
+                            )
+                            if sum(self.split_prefill_batch.global_num_tokens) > 0
+                            else self.model_config.num_hidden_layers
                         )
-                        if sum(self.split_prefill_batch.global_num_tokens) > 0
-                        else self.model_config.num_hidden_layers
-                    )
-                    next_split_index = min(
-                        self.split_prefill_batch.split_index + forward_count,
-                        self.model_config.num_hidden_layers,
-                    )
-                    forward_count = (
-                        next_split_index - self.split_prefill_batch.split_index
-                    )
-
-                    self.split_prefill_batch.split_forward_count = forward_count
-                    logger.debug(
-                        f"run split prefill batch from {self.split_prefill_batch.split_index} to {next_split_index}, forward count: {forward_count}"
-                    )
-                    prefill_result = self.run_batch(self.split_prefill_batch)
-                    if next_split_index == self.model_config.num_hidden_layers:
-                        self.split_prefill_batch.split_prefill_finished = True
-                        prefill_exe_done = prefill_stream.record_event()
-                    self.split_prefill_batch.split_index = next_split_index
-
-                elif wait_prefill_kernel_done:
-                    prefill_done = True
-                else:
-                    prefill_done = False
-
-            with torch.cuda.stream(decode_stream):
-                set_pdmux_status(False)
-                decode_stream.synchronize()
-                if decode_done:
-                    self.process_batch_result(self.running_batch, decode_result)
-                    # logger.debug(f"Finished decode batch {self.running_batch.reqs =}")
-
-            with torch.cuda.stream(prefill_stream):
-                set_pdmux_status(True)
-                if prefill_done and self.split_prefill_batch.split_prefill_finished:
-                    wait_prefill_kernel_done = True
-                    prefill_exe_done_flag = prefill_exe_done.query()
-                    flags = (
-                        torch.ones(1, device="cpu", dtype=torch.int32)
-                        if prefill_exe_done_flag
-                        else torch.zeros(1, device="cpu", dtype=torch.int32)
-                    )
-
-                    self.tp_cpu_group.allreduce(flags, dist.ReduceOp.SUM).wait()
-                    if flags.item() == self.tp_size:
-                        self.process_batch_result(
-                            self.split_prefill_batch, prefill_result
+                        next_split_index = min(
+                            self.split_prefill_batch.split_index + forward_count,
+                            self.model_config.num_hidden_layers,
+                        )
+                        forward_count = (
+                            next_split_index - self.split_prefill_batch.split_index
                         )
 
-                        if not self.split_prefill_batch.forward_mode.is_idle():
-                            if self.running_batch and not self.running_batch.is_empty():
-                                self.running_batch.merge_batch(self.split_prefill_batch)
-                            else:
-                                self.running_batch = self.split_prefill_batch
+                        self.split_prefill_batch.split_forward_count = forward_count
+                        logger.debug(
+                            f"run split prefill batch from {self.split_prefill_batch.split_index} to {next_split_index}, forward count: {forward_count}"
+                        )
+                        prefill_result = self.run_batch(self.split_prefill_batch)
+                        if next_split_index == self.model_config.num_hidden_layers:
+                            self.split_prefill_batch.split_prefill_finished = True
+                            prefill_exe_done = prefill_stream.record_event()
+                        self.split_prefill_batch.split_index = next_split_index
 
-                        self.split_prefill_batch = None
-                        wait_prefill_kernel_done = False
-                        adjust_stream_group = True
+                    elif wait_prefill_kernel_done:
+                        prefill_done = True
+                    else:
+                        prefill_done = False
+
+                with torch.cuda.stream(decode_stream):
+                    set_pdmux_status(False)
+                    decode_stream.synchronize()
+                    if decode_done:
+                        self.process_batch_result(self.running_batch, decode_result)
+                        # logger.debug(f"Finished decode batch {self.running_batch.reqs =}")
+
+                with torch.cuda.stream(prefill_stream):
+                    set_pdmux_status(True)
+                    if prefill_done and self.split_prefill_batch.split_prefill_finished:
+                        wait_prefill_kernel_done = True
+                        prefill_exe_done_flag = prefill_exe_done.query()
+                        flags = (
+                            torch.ones(1, device="cpu", dtype=torch.int32)
+                            if prefill_exe_done_flag
+                            else torch.zeros(1, device="cpu", dtype=torch.int32)
+                        )
+                        self.tp_cpu_group.allreduce(flags, dist.ReduceOp.SUM).wait()
+                        logger.info(f"tp_cpu_group {self.tp_cpu_group.size() =} rank {self.tp_cpu_group.rank() =} flags {flags.item() = } tp_size {self.tp_size = }")
+                        if flags.item() == self.tp_size:
+                            self.process_batch_result(
+                                self.split_prefill_batch, prefill_result
+                            )
+
+                            if not self.split_prefill_batch.forward_mode.is_idle():
+                                if self.running_batch and not self.running_batch.is_empty():
+                                    self.running_batch.merge_batch(self.split_prefill_batch)
+                                else:
+                                    self.running_batch = self.split_prefill_batch
+
+                            self.split_prefill_batch = None
+                            wait_prefill_kernel_done = False
+                            adjust_stream_group = True
+
+
+
+
+    # @torch.inference_mode()
+    # def event_loop_pdmux_dp_attn(self):
+    #     """A scheduler loop for pd multiplexing."""
+    #     decode_done = False
+    #     prefill_done = False
+    #     wait_prefill_kernel_done = False
+    #     adjust_stream_group = False
+    #     # set_current_stream_idx(1) # debug set 1
+    #     stream_idx = get_current_stream_idx()
+    #     stream_group = self.stream_groups[stream_idx]
+    #     prefill_stream = stream_group[0]
+    #     decode_stream = stream_group[1]
+    #     torch.cuda.empty_cache()
+
+    #     logger.debug("Starting event loop for pd multiplexing with dp attention ...")
+    #     logger.debug(
+    #         f"PDMux stream groups: {stream_idx}, prefill sm: {self.sm_counts[stream_idx][0]}, decode sm: {self.sm_counts[stream_idx][1]}"
+    #     )
+
+    #     while True:
+    #         with torch.cuda.stream(decode_stream):
+    #             set_pdmux_status(False)
+    #             recv_reqs = self.recv_requests()
+    #             self.process_input_requests(recv_reqs)
+
+    #         with torch.cuda.stream(prefill_stream):
+    #             set_pdmux_status(True)
+    #             sm_count = self.sm_counts[stream_idx][0]
+    #             if not wait_prefill_kernel_done:
+    #                 adjust_stream_group = (
+    #                     self.update_split_prefill_batch_dp(sm_count) or adjust_stream_group
+    #                 )
+
+    #         with torch.cuda.stream(decode_stream):
+    #             set_pdmux_status(False)
+    #             self.running_batch = self.update_running_batch(self.running_batch)
+    #             # logger.debug(f"Updated running batch {self.running_batch.reqs =}")
+    #             # Handle DP attn preparetion
+    #             batch = self.running_batch if not self.running_batch.is_empty() else None
+    #             batch = self.prepare_mlp_sync_batch(batch)
+    #             if batch:
+    #                 if not batch.is_empty():
+    #                     pass
+    #                     # logger.debug(f"NON-EMPTY DECODE {batch.global_num_tokens =}, local {batch.batch_size() =}")
+    #                 else:
+    #                     pass
+    #                     # logger.debug(f"IDLE DECODE {batch.global_num_tokens =}")
+                
+    #             self.running_batch = batch or ScheduleBatch(reqs=[])
+    #             is_decode_empty = sum(self.running_batch.global_num_tokens) == 0 if self.running_batch.global_num_tokens else True
+
+    #             adjust_stream_group = adjust_stream_group or (
+    #                 stream_idx > 0 and is_decode_empty
+    #             )
+    #             if not batch and self.split_prefill_batch is None:
+    #                 self.check_memory()
+    #                 self.check_tree_cache()
+    #                 self.new_token_ratio = self.init_new_token_ratio
+    #                 self.maybe_sleep_on_idle()
+
+    #         if adjust_stream_group:
+    #             prefill_stream.synchronize()
+    #             decode_stream.synchronize()
+    #             stream_idx, stream_group = self.adjust_stream_groups_dp()
+    #             prefill_stream = stream_group[0]
+    #             decode_stream = stream_group[1]
+    #             adjust_stream_group = False
+    #             logger.info(
+    #                 f"Adjusting stream groups: {stream_idx}, prefill sm: {self.sm_counts[stream_idx][0]}, decode sm: {self.sm_counts[stream_idx][1]}"
+    #             )
+
+    #         with torch.cuda.stream(decode_stream):
+    #             set_pdmux_status(False)
+    #             # process decode batch
+    #             if not self.running_batch.is_empty():
+    #                 # logger.debug("run decode batch")
+    #                 decode_result = self.run_batch(self.running_batch)
+    #                 decode_done = True
+    #             elif self.running_batch.forward_mode and self.running_batch.forward_mode.is_idle():
+    #                 # logger.debug("run decode IDLE batch")
+    #                 decode_result = self.run_batch(self.running_batch)
+    #                 decode_done = True
+    #             else:
+    #                 decode_done = False
+    #         with torch.cuda.stream(prefill_stream):
+    #             set_pdmux_status(True)
+    #             if (
+    #                 self.split_prefill_batch
+    #                 and (not self.split_prefill_batch.is_empty() or self.split_prefill_batch.forward_mode == ForwardMode.SPLIT_PREFILL_IDLE)
+    #                 and not wait_prefill_kernel_done
+    #             ):
+    #                 prefill_done = True
+    #                 forward_count = (
+    #                     max(
+    #                         1,
+    #                         self.pdmux_config.split_forward_token_budget
+    #                         // sum(self.split_prefill_batch.global_num_tokens),
+    #                     )
+    #                     if sum(self.split_prefill_batch.global_num_tokens) > 0
+    #                     else self.model_config.num_hidden_layers
+    #                 )
+    #                 next_split_index = min(
+    #                     self.split_prefill_batch.split_index + forward_count,
+    #                     self.model_config.num_hidden_layers,
+    #                 )
+    #                 forward_count = (
+    #                     next_split_index - self.split_prefill_batch.split_index
+    #                 )
+
+    #                 self.split_prefill_batch.split_forward_count = forward_count
+    #                 logger.debug(
+    #                     f"run split prefill batch from {self.split_prefill_batch.split_index} to {next_split_index}, forward count: {forward_count}"
+    #                 )
+    #                 prefill_result = self.run_batch(self.split_prefill_batch)
+    #                 if next_split_index == self.model_config.num_hidden_layers:
+    #                     self.split_prefill_batch.split_prefill_finished = True
+    #                     prefill_exe_done = prefill_stream.record_event()
+    #                 self.split_prefill_batch.split_index = next_split_index
+
+    #             elif wait_prefill_kernel_done:
+    #                 prefill_done = True
+    #             else:
+    #                 prefill_done = False
+
+    #         with torch.cuda.stream(decode_stream):
+    #             set_pdmux_status(False)
+    #             decode_stream.synchronize()
+    #             if decode_done:
+    #                 self.process_batch_result(self.running_batch, decode_result)
+    #                 # logger.debug(f"Finished decode batch {self.running_batch.reqs =}")
+
+    #         with torch.cuda.stream(prefill_stream):
+    #             set_pdmux_status(True)
+    #             if prefill_done and self.split_prefill_batch.split_prefill_finished:
+    #                 wait_prefill_kernel_done = True
+    #                 prefill_exe_done_flag = prefill_exe_done.query()
+    #                 flags = (
+    #                     torch.ones(1, device="cpu", dtype=torch.int32)
+    #                     if prefill_exe_done_flag
+    #                     else torch.zeros(1, device="cpu", dtype=torch.int32)
+    #                 )
+
+    #                 self.tp_cpu_group.allreduce(flags, dist.ReduceOp.SUM).wait()
+    #                 if flags.item() == self.tp_size:
+    #                     self.process_batch_result(
+    #                         self.split_prefill_batch, prefill_result
+    #                     )
+
+    #                     if not self.split_prefill_batch.forward_mode.is_idle():
+    #                         if self.running_batch and not self.running_batch.is_empty():
+    #                             self.running_batch.merge_batch(self.split_prefill_batch)
+    #                         else:
+    #                             self.running_batch = self.split_prefill_batch
+
+    #                     self.split_prefill_batch = None
+    #                     wait_prefill_kernel_done = False
+    #                     adjust_stream_group = True
+

@@ -1781,7 +1781,6 @@ class Scheduler(
 
         # Handle DP attention
         if need_dp_attn_preparation:
-            logger.info("Preparing DP attention")
             self.maybe_handle_dp_balance_data()
             ret = self.prepare_mlp_sync_batch(ret)
 
