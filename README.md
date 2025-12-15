@@ -78,17 +78,6 @@ For enterprises interested in adopting or deploying SGLang at scale, including t
 We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql).
 
 <!-- Thank you for your contribution! Please follow these guidelines to enhance your pull request. If anything is unclear, submit your PR and reach out to maintainers for assistance. Join our Slack community at https://slack.sglang.ai to discuss further. -->
-## Motivation
-Support PD-Multiplexing
-## Modifications
-- Scheduler:
-  - Implemented pdmux scheduling loop in `srt/multiplex/multiplexing.py`.
-  - Manage PD-Multiplexing context as global variables in `srt/multiplex/pdmux_context.py`.
-  - Added new fields to ScheduleBatch to support split prefill mode.
-  - Added forward_batch_split_prefill() in `tp_worker.py` to support split prefill mode.
-- Server Args: Extended `server_args.py` with `--enable-pdmux` and `--pdmux-config-path` flags.
-- CudaGraphRunner: Record and replay a set of CUDA graphs for each sm partition.
-- pynccl: Add an interface to let the pynccl communicator use the current CUDA stream.
 ### Build your environment from this PR
 Versions of other packages:
 - torch: 2.6.0+cu126 (Note that you may build sgl-kernel by yourself under this torch version)
