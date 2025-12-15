@@ -89,19 +89,7 @@ Support PD-Multiplexing
 - Server Args: Extended `server_args.py` with `--enable-pdmux` and `--pdmux-config-path` flags.
 - CudaGraphRunner: Record and replay a set of CUDA graphs for each sm partition.
 - pynccl: Add an interface to let the pynccl communicator use the current CUDA stream.
-- [Docs updated](https://github.com/ykcombat/sglang/blob/e84aa1bdd055df93e603a46fa6ca5e60afd213f5/docs/advanced_features/pd_multiplexing.md) (keep updating)
-## Environment
-### Use our prebuilt Docker image
-```sh
-docker pull combathhhhhh/pdmux:sglpr_torch2.6_bench
-```
-and the source code in the container:
-```sh
-cd /workspace/sglang
-```
 ### Build your environment from this PR
-Primary code:
-- [Current Branch](https://github.com/sgl-project/sglang/pull/10692/commits/dde984e4eef060b5df839d4cefb3855f07390e9b)
 Versions of other packages:
 - torch: 2.6.0+cu126 (Note that you may build sgl-kernel by yourself under this torch version)
 - cuda: 12.6
